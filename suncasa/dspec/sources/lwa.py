@@ -28,10 +28,19 @@ def timestamp_to_mjd(times):
     ts = ts.mjd
     return ts
 
+def apply_xhand_delay_UV(specU,specV,frequencies, xhand_delay): # delay in ns, freq in Hz
+
+    xhand_phase = 2*np.pi*frequencies*xhand_delay/1e9
+    outU =  specU* np.cos(xhand_phase) + specV*np.sin(xhand_phase)
+    outV = -specU* np.sin(xhand_phase) + specV*np.cos(xhand_phase)
+
+    return outU, outV
+
 
 def read_data(filename, stokes='I', timerange=[], freqrange=[], timebin=1, freqbin=1, verbose=True, 
             flux_factor_file=None, bkg_file=None,  do_pb_correction=False, 
-            flux_factor_calfac_x = None, flux_factor_calfac_y = None, bkg_flux_arr = None):
+            flux_factor_calfac_x = None, flux_factor_calfac_y = None, bkg_flux_arr = None,
+            xhand_delay=None):
     '''
     :param filename: name of the OVRO-LWA hdf5 beamforming file; 
               This can be a string (single file) or a list of strings (multiple files)
@@ -49,6 +58,7 @@ def read_data(filename, stokes='I', timerange=[], freqrange=[], timebin=1, freqb
     :param flux_factor_calfac_x: user input correction factor for the X polarization
     :param flux_factor_calfac_y: user input correction factor for the Y polarization
     :param bkg_flux_arr: user input background flux in Jy
+    :param xhand_delay: user input crosshand delay in nanoseconds, applied if not None and stokes.upper() == 'IV'
     '''
     # Check the input filename
     if type(filename) == str:
@@ -233,6 +243,11 @@ def read_data(filename, stokes='I', timerange=[], freqrange=[], timebin=1, freqb
 
             if stokes.upper() == 'IV':
                 spec_V = data['Observation1']['Tuning1']['XY_imag'][ti0:ti1, fi0:fi1] / ((calfac_x[None, fi0:fi1] + calfac_y[None, fi0:fi1]) / 2.)
+                if not (xhand_delay is None):
+                    spec_U = data['Observation1']['Tuning1']['XY_real'][ti0:ti1, fi0:fi1] / ((calfac_x[None, fi0:fi1] + calfac_y[None, fi0:fi1]) / 2.)
+                    spec_U_corrected, spec_V_corrected = apply_xhand_delay_UV(spec_U, spec_V, freqs, xhand_delay)
+                    spec_V = spec_V_corrected
+                
                 spec = np.stack((spec_I, spec_V), axis=2)
                 stokes_out = ['I', 'V']
             else:
