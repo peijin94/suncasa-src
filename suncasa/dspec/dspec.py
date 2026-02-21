@@ -1255,9 +1255,23 @@ class Dspec:
                     norm = colors.Normalize(vmax=vmax, vmin=vmin)
 
                 if minmaxpercentile:
+                    spec_plt[spec_plt<1e-4] = np.nan
                     if percentile[0] > 0 and percentile[1] < 100 and percentile[0] < percentile[1]:
                         norm.vmax = np.nanpercentile(spec_plt, percentile[1])
-                        norm.vmin = np.nanpercentile(spec_plt, percentile[0])
+                        norm.vmin = np.nanpercentile(spec_plt, percentile[0])                        
+                        if norm.vmin < 1e-4:
+                            norm.vmin = 1e-4
+                        if norm.vmax < norm.vmin:
+                            norm.vmax = norm.vmin+1e-4
+
+                    else:
+                        # percentile is not set, use the max and min of the data
+                        norm.vmax = np.nanmax(spec_plt)
+                        norm.vmin = np.nanmin(spec_plt)
+                        if norm.vmin < 1e-4:
+                            norm.vmin = 1e-4
+                        if norm.vmax < norm.vmin:
+                            norm.vmax = norm.vmin+1e-4
 
                 if plot_fast:
                     # rebin the data to speed up plotting
@@ -1391,6 +1405,18 @@ class Dspec:
                     if percentile[0] > 0 and percentile[1] < 100 and percentile[0] < percentile[1]:
                         norm.vmax = np.nanpercentile(spec_plt_1, percentile[1])
                         norm.vmin = np.nanpercentile(spec_plt_1, percentile[0])
+                        if norm.vmin < 1e-4:
+                            norm.vmin = 1e-4
+                        if norm.vmax < norm.vmin:
+                            norm.vmax = norm.vmin+1e-4
+                    else:
+                        # percentile is not set, use the max and min of the data
+                        norm.vmax = np.nanmax(spec_plt_1)
+                        norm.vmin = np.nanmin(spec_plt_1)
+                        if norm.vmin < 1e-4:
+                            norm.vmin = 1e-4
+                        if norm.vmax < norm.vmin:
+                            norm.vmax = norm.vmin+1e-4
 
                 if plot_fast:
                     # compress in time (idx1)
