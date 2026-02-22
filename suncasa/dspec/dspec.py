@@ -368,7 +368,10 @@ class Dspec:
 
         elif source.lower() == 'lwa' and type(fname) is list:
             from .sources import lwa
-            spec, tim, freq, pol, calfac_x, calfac_y, bkg_flux = lwa.read_data(fname, **kwargs)
+            result = lwa.read_data(fname, **kwargs)
+            if result is False:
+                raise ValueError('lwa.read_data returned no data (all files missing or unreadable).')
+            spec, tim, freq, pol, calfac_x, calfac_y, bkg_flux = result
             self.data = spec
             self.time_axis = Time(tim, format='mjd')
             self.freq_axis = freq
@@ -1405,18 +1408,18 @@ class Dspec:
                     if percentile[0] > 0 and percentile[1] < 100 and percentile[0] < percentile[1]:
                         norm.vmax = np.nanpercentile(spec_plt_1, percentile[1])
                         norm.vmin = np.nanpercentile(spec_plt_1, percentile[0])
-                        if norm.vmin < 1e-4:
-                            norm.vmin = 1e-4
+                        if norm.vmin < 1e-3:
+                            norm.vmin = 1e-3
                         if norm.vmax < norm.vmin:
-                            norm.vmax = norm.vmin+1e-4
+                            norm.vmax = norm.vmin+1e-3
                     else:
                         # percentile is not set, use the max and min of the data
                         norm.vmax = np.nanmax(spec_plt_1)
                         norm.vmin = np.nanmin(spec_plt_1)
-                        if norm.vmin < 1e-4:
-                            norm.vmin = 1e-4
+                        if norm.vmin < 1e-3:
+                            norm.vmin = 1e-3
                         if norm.vmax < norm.vmin:
-                            norm.vmax = norm.vmin+1e-4
+                            norm.vmax = norm.vmin+1e-3
 
                 if plot_fast:
                     # compress in time (idx1)

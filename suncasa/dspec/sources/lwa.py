@@ -19,6 +19,36 @@ def rebin2d(arr, new_shape):
     return arr.reshape(shape).mean(-1).mean(1)
 
 
+def _read_hdf5_chunked(ds, ti0, ti1, fi0, fi1, timebin, chunk_size=512):
+    """Read an HDF5 dataset in time chunks and rebin on-the-fly to avoid
+    loading the full time axis into memory at once.
+
+    Returns a float32 array of shape (nt_new, nf) where nt_new = n_time // timebin.
+    Any trailing samples that don't fill a complete timebin are discarded.
+    """
+    nf = fi1 - fi0
+    n_time = ti1 - ti0
+    nt_new = n_time // timebin          # number of output time samples
+    n_time_used = nt_new * timebin      # trim to exact multiple
+
+    # chunk_size must be a multiple of timebin so each chunk rebins cleanly
+    chunk_size = max(timebin, (chunk_size // timebin) * timebin)
+
+    out = np.empty((nt_new, nf), dtype=np.float32)
+    out_row = 0
+
+    for start in range(0, n_time_used, chunk_size):
+        end = min(start + chunk_size, n_time_used)
+        block = ds[ti0 + start: ti0 + end, fi0:fi1].astype(np.float32)
+        n_block = end - start
+        n_bins = n_block // timebin
+        block = block[:n_bins * timebin].reshape(n_bins, timebin, nf).mean(axis=1)
+        out[out_row: out_row + n_bins] = block
+        out_row += n_bins
+
+    return out
+
+
 def timestamp_to_mjd(times):
     # This is from Ivey Davis's BeamTools.py
     t_flat = np.array(list(itertools.chain(*times)))
@@ -87,6 +117,15 @@ def read_data(filename, stokes='I', timerange=[], freqrange=[], timebin=1, freqb
             data = h5py.File(file, 'r',swmr=True)
             freqs = data['Observation1']['Tuning1']['freq'][:]
             ts = data['Observation1']['time'][:]
+
+            if len(ts) <=1:
+                print('Time stamps are not monotonically increasing. Skip this file.')
+                raise ValueError('Time stamps are not monotonically increasing.')
+            # check if ts_arr increasing, if not, raise an error
+            if not ts[-1] > ts[0]:
+                print('Time stamps are not monotonically increasing. Skip this file.')
+                raise ValueError('Time stamps are not monotonically increasing.')
+
             # The following line works the same way as timestamp_to_mjd(), but a bit too slow
             # times_mjd = np.array([(Time(t[0], format='unix') + TimeDelta(t[1], format='sec')).mjd for t in ts])
             times_mjd = timestamp_to_mjd(ts)
@@ -197,95 +236,126 @@ def read_data(filename, stokes='I', timerange=[], freqrange=[], timebin=1, freqb
 
         if stokes not in stokes_valid:
             raise Exception("Provided Stokes {0:s} is not in 'XX, YY, RR, LL, I, Q, U, V'".format(stokes))
-        if stokes.upper() == 'XX':
-            spec = data['Observation1']['Tuning1']['XX'][ti0:ti1, fi0:fi1] / calfac_x[None, fi0:fi1]
-            stokes_out = ['XX']
-        if stokes.upper() == 'YY':
-            spec = data['Observation1']['Tuning1']['YY'][ti0:ti1, fi0:fi1] / calfac_y[None, fi0:fi1]
-            stokes_out = ['YY']
-        if stokes.upper() == 'I' or stokes.upper() == 'IV':
-            spec_I = (data['Observation1']['Tuning1']['XX'][ti0:ti1, fi0:fi1] / calfac_x[None, fi0:fi1] + \
-                   data['Observation1']['Tuning1']['YY'][ti0:ti1, fi0:fi1] / calfac_y[None, fi0:fi1]) / 2. - \
-                   bkg_flux[None, fi0:fi1] / ((calfac_x[None, fi0:fi1] + calfac_y[None, fi0:fi1]) / 2.) 
-            if verbose:
-                print('Median of the subtracted background flux (Jy)', np.median(bkg_flux[None, fi0:fi1] / ((calfac_x[None, fi0:fi1] + calfac_y[None, fi0:fi1]) / 2.)))
-                print('RMS of the subtracted background flux (Jy)', np.std(bkg_flux[None, fi0:fi1] / ((calfac_x[None, fi0:fi1] + calfac_y[None, fi0:fi1]) / 2.)))
-            if do_pb_correction:
-                pbfacs = np.ones_like(times_mjd)
-                t0 = times_mjd[0]
-                t1 = times_mjd[-1]
-                if t1-t0 > 5./1440.:
-                    nstep = int((t1-t0)/(5./1440.))
-                    ts_ref = np.linspace(t0, t1, nstep)
-                    pbfacs_ref = np.ones_like(ts_ref) 
-                    print('Duration of the file is {0:.1f} hours, interpolating into {1:d} steps.'.format((t1-t0)*24., nstep))
-                    for i, t_ref in enumerate(ts_ref):
+
+        # --- calibration factor slices (small 1-D arrays, fine to keep in RAM) ---
+        cx = calfac_x[fi0:fi1].astype(np.float32)   # shape (nf,)
+        cy = calfac_y[fi0:fi1].astype(np.float32)
+        bkg = bkg_flux[fi0:fi1].astype(np.float32)
+        cavg = (cx + cy) / 2.
+
+        try:
+            ds = data['Observation1']['Tuning1']
+            if stokes.upper() == 'XX':
+                spec_new = _read_hdf5_chunked(ds['XX'], ti0, ti1, fi0, fi1, timebin) / cx[None, :]
+                stokes_out = ['XX']
+                npol = 1
+            elif stokes.upper() == 'YY':
+                spec_new = _read_hdf5_chunked(ds['YY'], ti0, ti1, fi0, fi1, timebin) / cy[None, :]
+                stokes_out = ['YY']
+                npol = 1
+            elif stokes.upper() == 'I' or stokes.upper() == 'IV':
+                xx_rb = _read_hdf5_chunked(ds['XX'], ti0, ti1, fi0, fi1, timebin)
+                yy_rb = _read_hdf5_chunked(ds['YY'], ti0, ti1, fi0, fi1, timebin)
+                spec_I = xx_rb / cx[None, :] / 2. + yy_rb / cy[None, :] / 2. - bkg[None, :] / cavg[None, :]
+                del xx_rb, yy_rb
+                if verbose:
+                    print('Median of the subtracted background flux (Jy)', np.median(bkg / cavg))
+                    print('RMS of the subtracted background flux (Jy)', np.std(bkg / cavg))
+                if do_pb_correction:
+                    nt_pb = spec_I.shape[0]
+                    times_mjd_rb = rebin1d(times_mjd[:(nt_pb * timebin)], nt_pb) if nt_pb * timebin <= len(times_mjd) else times_mjd[:nt_pb]
+                    pbfacs = np.ones(nt_pb, dtype=np.float32)
+                    t0_pb = times_mjd_rb[0]
+                    t1_pb = times_mjd_rb[-1]
+                    if t1_pb - t0_pb > 5. / 1440.:
+                        nstep = int((t1_pb - t0_pb) / (5. / 1440.))
+                        ts_ref = np.linspace(t0_pb, t1_pb, nstep)
+                        pbfacs_ref = np.ones_like(ts_ref)
+                        print('Duration of the file is {0:.1f} hours, interpolating into {1:d} steps.'.format((t1_pb - t0_pb) * 24., nstep))
+                        for i, t_ref in enumerate(ts_ref):
+                            sun_loc = get_body('sun', Time(t_ref, format='mjd'), location=obs)
+                            alt = sun_loc.transform_to(AltAz(obstime=Time(t_ref, format='mjd'), location=obs)).alt.radian
+                            if np.degrees(alt) > 5.:
+                                pbfacs_ref[i] = np.sin(alt) ** 1.6
+                            else:
+                                print('Warning! Calculated solar altitude is lower than 5 degrees. Something is wrong with the data (non-solar)?')
+                                pbfacs_ref[i] = np.sin(np.radians(5.)) ** 1.6
+                        pbfacs = np.interp(times_mjd_rb, ts_ref, pbfacs_ref).astype(np.float32)
+                    else:
+                        print('Duration of the file is {0:.1f} minutes, no interpolation will be done.'.format((t1_pb - t0_pb) * 24. * 60.))
+                        t_ref = (t0_pb + t1_pb) / 2.
                         sun_loc = get_body('sun', Time(t_ref, format='mjd'), location=obs)
                         alt = sun_loc.transform_to(AltAz(obstime=Time(t_ref, format='mjd'), location=obs)).alt.radian
                         if np.degrees(alt) > 5.:
-                            pbfacs_ref[i]=np.sin(alt)**1.6
+                            pbfacs *= np.sin(alt) ** 1.6
                         else:
-                            print('Warning! Calculated solar altitude is lower than 5 degrees. Something is wrong with the data (non-solar)?') 
-                            pbfacs_ref[i]=np.sin(np.radians(5.))**1.6
+                            print('Warning! Calculated solar altitude is lower than 5 degrees. Something is wrong with the data (non-solar)?')
+                            pbfacs *= np.sin(np.radians(5.)) ** 1.6
+                    spec_I /= pbfacs[:, None]
 
-                    pbfacs = np.interp(times_mjd, ts_ref, pbfacs_ref)
+                if stokes.upper() == 'IV':
+                    spec_V = _read_hdf5_chunked(ds['XY_imag'], ti0, ti1, fi0, fi1, timebin) / cavg[None, :]
+                    if xhand_delay is not None:
+                        spec_U = _read_hdf5_chunked(ds['XY_real'], ti0, ti1, fi0, fi1, timebin) / cavg[None, :]
+                        spec_U, spec_V = apply_xhand_delay_UV(spec_U, spec_V, freqs, xhand_delay)
+                    spec_new = np.stack((spec_I, spec_V), axis=2)
+                    del spec_I, spec_V
+                    stokes_out = ['I', 'V']
+                    npol = 2
                 else:
-                    print('Duration of the file is {0:.1f} minutes, no interpolation will be done.'.format((t1-t0)*24.*60.))
-                    t_ref = (t0+t1)/2.
-                    sun_loc = get_body('sun', Time(t_ref, format='mjd'), location=obs)
-                    alt = sun_loc.transform_to(AltAz(obstime=Time(t_ref, format='mjd'), location=obs)).alt.radian
-                    if np.degrees(alt) > 5.:
-                        pbfacs *= np.sin(alt)**1.6
-                    else:
-                        print('Warning! Calculated solar altitude is lower than 5 degrees. Something is wrong with the data (non-solar)?') 
-                        pbfacs *= np.sin(np.radians(5.))**1.6
-                spec_I /= pbfacs[:, None]
+                    spec_new = spec_I
+                    del spec_I
+                    stokes_out = ['I']
+                    npol = 1
+            elif stokes.upper() == 'V':
+                spec_new = _read_hdf5_chunked(ds['XY_imag'], ti0, ti1, fi0, fi1, timebin) / cavg[None, :]
+                stokes_out = ['V']
+                npol = 1
+            elif stokes.upper() == 'Q':
+                xx_rb = _read_hdf5_chunked(ds['XX'], ti0, ti1, fi0, fi1, timebin)
+                yy_rb = _read_hdf5_chunked(ds['YY'], ti0, ti1, fi0, fi1, timebin)
+                spec_new = xx_rb / cx[None, :] / 2. - yy_rb / cy[None, :] / 2.
+                del xx_rb, yy_rb
+                stokes_out = ['Q']
+                npol = 1
+            elif stokes.upper() == 'U':
+                spec_new = _read_hdf5_chunked(ds['XY_real'], ti0, ti1, fi0, fi1, timebin) / cavg[None, :]
+                stokes_out = ['U']
+                npol = 1
+        except Exception as e:
+            print('Failed to read spectral data from {0:s}: {1:s}. Skip this file.'.format(file, str(e)))
+            if not firstset_read:
+                n0 += 1
+            continue
 
-            if stokes.upper() == 'IV':
-                spec_V = data['Observation1']['Tuning1']['XY_imag'][ti0:ti1, fi0:fi1] / ((calfac_x[None, fi0:fi1] + calfac_y[None, fi0:fi1]) / 2.)
-                if not (xhand_delay is None):
-                    spec_U = data['Observation1']['Tuning1']['XY_real'][ti0:ti1, fi0:fi1] / ((calfac_x[None, fi0:fi1] + calfac_y[None, fi0:fi1]) / 2.)
-                    spec_U_corrected, spec_V_corrected = apply_xhand_delay_UV(spec_U, spec_V, freqs, xhand_delay)
-                    spec_V = spec_V_corrected
-                
-                spec = np.stack((spec_I, spec_V), axis=2)
-                stokes_out = ['I', 'V']
-            else:
-                spec = spec_I
-                stokes_out = ['I'] 
-        if stokes == 'V':
-            spec = data['Observation1']['Tuning1']['XY_imag'][ti0:ti1, fi0:fi1] / ((calfac_x[None, fi0:fi1] + calfac_y[None, fi0:fi1]) / 2.)
-            stokes_out = ['V'] 
-        if stokes == 'Q':
-            spec = (data['Observation1']['Tuning1']['XX'][ti0:ti1, fi0:fi1] / calfac_x[None, fi0:fi1] - \
-                    data['Observation1']['Tuning1']['YY'][ti0:ti1, fi0:fi1] / calfac_y[None, fi0:fi1]) / 2. 
-            stokes_out = ['Q'] 
-        if stokes == 'U':
-            spec = data['Observation1']['Tuning1']['XY_real'][ti0:ti1, fi0:fi1] / ((calfac_x[None, fi0:fi1] + calfac_y[None, fi0:fi1]) / 2.)
-            stokes_out = ['U'] 
+        # spec_new is already time-rebinned by _read_hdf5_chunked; shape is (nt_new, nf[, npol])
+        # Apply the valid-time filter (times_mjd > 50000) on the rebinned time axis
+        nt_new = spec_new.shape[0]
+        n_time_used = nt_new * timebin
+        times_mjd_rb = rebin1d(times_mjd[:n_time_used], nt_new)
+        idx, = np.where(times_mjd_rb > 50000.)
+        times_mjd_rb = times_mjd_rb[idx]
+        spec_new = spec_new[idx]
 
-        idx, = np.where(times_mjd > 50000.) # filter out those prior to 1995 (obviously wrong for OVRO-LWA)
-        times_mjd = times_mjd[idx]
-        spec = spec[idx]
+        try:
+            # Frequency rebin
+            nf = spec_new.shape[1]
+            nf_new = nf // freqbin
+            if spec_new.ndim == 2:
+                spec_new = rebin2d(spec_new[:, :nf_new * freqbin], (nt_new, nf_new))
+            else:  # ndim == 3
+                spec_new = np.stack(
+                    [rebin2d(spec_new[:, :nf_new * freqbin, i], (nt_new, nf_new)) for i in range(npol)],
+                    axis=2)
+            spec_new = np.transpose(spec_new).reshape((npol, 1, nf_new, nt_new)) / 1e4
+            times_mjd_new = times_mjd_rb
+            freqs_new = rebin1d(freqs[:nf_new * freqbin], nf_new)
+        except Exception as e:
+            print('Failed to rebin data from {0:s}: {1:s}. Skip this file.'.format(file, str(e)))
+            if not firstset_read:
+                n0 += 1
+            continue
 
-        if spec.ndim == 2:
-            # TODO: for now I have just ignored the rest of the data that falls outside of the whole factor of timebin * nt_new or freqbin * nf_new 
-            nt, nf = spec.shape
-            npol = 1
-            nt_new, nf_new = (nt // timebin, nf // freqbin)
-            spec_new = rebin2d(spec[:nt_new*timebin, :nf_new*freqbin], (nt_new, nf_new))
-        if spec.ndim == 3:
-            nt, nf, npol = spec.shape
-            spec_new_ = [] 
-            for i in range(npol):
-                nt_new, nf_new = (nt // timebin, nf // freqbin)
-                spec_ = spec[:, :, i]
-                spec_new_.append(rebin2d(spec_[:nt_new*timebin, :nf_new*freqbin], (nt_new, nf_new)))
-            spec_new = np.stack(spec_new_, axis=2)
-            
-        spec_new = np.transpose(spec_new).reshape((npol, 1, nf_new, nt_new)) / 1e4
-        times_mjd_new = rebin1d(times_mjd[:nt_new * timebin], nt_new)
-        freqs_new = rebin1d(freqs[:nf_new * freqbin], nf_new)
         if firstset_read:
             if n == n0:
                 nfreq0 = len(freqs_new)
@@ -295,7 +365,7 @@ def read_data(filename, stokes='I', timerange=[], freqrange=[], timebin=1, freqb
             elif n > n0:
                 if len(freqs_new) != nfreq0:
                     print('Something is wrong in concatenating {}'.format(file)) 
-                    print('Dimension of the output frequency {0:d} does not match that of the first file {1:d)'.format(len(freqs_new), nfreq0)) 
+                    print('Dimension of the output frequency {0:d} does not match that of the first file {1:d}'.format(len(freqs_new), nfreq0)) 
                     continue
                 else:
                     spec_out = np.concatenate((spec_out, spec_new), axis=3)
