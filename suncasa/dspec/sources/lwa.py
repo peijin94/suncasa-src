@@ -118,12 +118,19 @@ def read_data(filename, stokes='I', timerange=[], freqrange=[], timebin=1, freqb
             freqs = data['Observation1']['Tuning1']['freq'][:]
             ts = data['Observation1']['time'][:]
 
-            if len(ts) <=1:
-                print('Time stamps are not monotonically increasing. Skip this file.')
-                raise ValueError('Time stamps are not monotonically increasing.')
-            # check if ts_arr increasing, if not, raise an error
-            if not ts[-1] > ts[0]:
-                print('Time stamps are not monotonically increasing. Skip this file.')
+            # ts dtype may be structured with named fields (int, frac) or plain 2-D.
+            # Extract the integer unix-seconds column for safe scalar comparison.
+            if ts.dtype.names and 'int' in ts.dtype.names:
+                ts_int = ts['int']
+            else:
+                ts_int = np.asarray(ts)[:, 0]
+            # Strip trailing sentinel rows (int==0) written by the recorder.
+            valid_mask = ts_int > 0
+            ts = ts[valid_mask]
+            ts_int = ts_int[valid_mask]
+            if len(ts) <= 1:
+                raise ValueError('Too few valid time stamps ({}).'.format(len(ts)))
+            if not ts_int[-1] > ts_int[0]:
                 raise ValueError('Time stamps are not monotonically increasing.')
 
             # The following line works the same way as timestamp_to_mjd(), but a bit too slow
@@ -131,8 +138,8 @@ def read_data(filename, stokes='I', timerange=[], freqrange=[], timebin=1, freqb
             times_mjd = timestamp_to_mjd(ts)
             idx0, = np.where(times_mjd > 50000.) # filter out those prior to 1995 (obviously wrong for OVRO-LWA)
 
-        except:
-            print('Cannot read {0:s}. Skip this file.'.format(file))
+        except Exception as e:
+            print('Cannot read {0:s}: {1:s}. Skip this file.'.format(file, str(e)))
             continue
         
         # read the flux factors file if provided
