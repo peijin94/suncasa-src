@@ -88,7 +88,7 @@ def read_data(filename, stokes='I', timerange=[], freqrange=[], timebin=1, freqb
     :param flux_factor_calfac_x: user input correction factor for the X polarization
     :param flux_factor_calfac_y: user input correction factor for the Y polarization
     :param bkg_flux_arr: user input background flux in Jy
-    :param crosshand_delay: user input crosshand delay in nanoseconds, apply if not None and stokes is 'IV'
+    :param xhand_delay: user input crosshand delay in nanoseconds, applied if not None and stokes.upper() == 'IV'
     '''
     # Check the input filename
     if type(filename) == str:
