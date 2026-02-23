@@ -140,8 +140,10 @@ def read_data(filename, stokes='I', timerange=[], freqrange=[], timebin=1, freqb
 
         except Exception as e:
             print('Cannot read {0:s}: {1:s}. Skip this file.'.format(file, str(e)))
+            if not firstset_read:
+                n0 += 1
             continue
-        
+
         # read the flux factors file if provided
         if not (flux_factor_file is None): 
             try:
