@@ -368,7 +368,10 @@ class Dspec:
 
         elif source.lower() == 'lwa' and type(fname) is list:
             from .sources import lwa
-            spec, tim, freq, pol, calfac_x, calfac_y, bkg_flux = lwa.read_data(fname, **kwargs)
+            result = lwa.read_data(fname, **kwargs)
+            if result is False:
+                raise ValueError('lwa.read_data returned no data (all files missing or unreadable).')
+            spec, tim, freq, pol, calfac_x, calfac_y, bkg_flux = result
             self.data = spec
             self.time_axis = Time(tim, format='mjd')
             self.freq_axis = freq
@@ -1273,6 +1276,19 @@ class Dspec:
                         if norm.vmax < norm.vmin:
                             norm.vmax = norm.vmin+1e-4
 
+                # Ensure valid vmin/vmax (avoid "Invalid vmin or vmax" when data is all-NaN or constant)
+                vmin_n = getattr(norm, 'vmin', None)
+                vmax_n = getattr(norm, 'vmax', None)
+                if vmin_n is None or not np.isfinite(vmin_n):
+                    vmin_n = 1e-4
+                if vmax_n is None or not np.isfinite(vmax_n):
+                    vmax_n = max(vmin_n + 1e-4, 1.0)
+                if vmax_n <= vmin_n:
+                    vmax_n = vmin_n + 1e-4
+                vmin_n = max(vmin_n, 1e-4)  # LogNorm requires vmin > 0
+                norm.vmin = vmin_n
+                norm.vmax = vmax_n
+
                 if plot_fast:
                     # rebin the data to speed up plotting
                     ds_shape = spec_plt.shape
@@ -1405,18 +1421,18 @@ class Dspec:
                     if percentile[0] > 0 and percentile[1] < 100 and percentile[0] < percentile[1]:
                         norm.vmax = np.nanpercentile(spec_plt_1, percentile[1])
                         norm.vmin = np.nanpercentile(spec_plt_1, percentile[0])
-                        if norm.vmin < 1e-4:
-                            norm.vmin = 1e-4
+                        if norm.vmin < 1e-3:
+                            norm.vmin = 1e-3
                         if norm.vmax < norm.vmin:
-                            norm.vmax = norm.vmin+1e-4
+                            norm.vmax = norm.vmin+1e-3
                     else:
                         # percentile is not set, use the max and min of the data
                         norm.vmax = np.nanmax(spec_plt_1)
                         norm.vmin = np.nanmin(spec_plt_1)
-                        if norm.vmin < 1e-4:
-                            norm.vmin = 1e-4
+                        if norm.vmin < 1e-3:
+                            norm.vmin = 1e-3
                         if norm.vmax < norm.vmin:
-                            norm.vmax = norm.vmin+1e-4
+                            norm.vmax = norm.vmin+1e-3
 
                 if plot_fast:
                     # compress in time (idx1)
@@ -1486,9 +1502,12 @@ class Dspec:
                     vmin2 = vmin
                 if vmax2 is None:
                     vmax2 = vmax
-                norm2 = colors.Normalize(vmax=vmax2, vmin=vmin2)
-
-
+                # Ensure valid vmin2/vmax2 for second panel (avoid "Invalid vmin or vmax")
+                v2_lo = vmin2 if vmin2 is not None and np.isfinite(vmin2) else -1.0
+                v2_hi = vmax2 if vmax2 is not None and np.isfinite(vmax2) else 1.0
+                if v2_hi <= v2_lo:
+                    v2_hi = v2_lo + 1e-6
+                norm2 = colors.Normalize(vmax=v2_hi, vmin=v2_lo)
 
                 if plot_fast:
                     im = ax2.imshow(spec_plt_2, cmap=cmap2, norm=norm2, aspect='auto', origin='lower',
